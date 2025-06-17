@@ -1,0 +1,8 @@
+{
+   "rpc": "https://toncenter.com/api/v2/jsonRPC",
+    "tonweb_api_key": "toncenter_API_KEY",
+    "token_address": "EQCkdx5PSWjj-Bt0X-DRCfNev6ra1NVv9qqcu-W2-SaToSHI",
+    "bot_api_key": "BOT_API_KEY",
+    "channel_id": "-1000000000000",
+    "miner_seed": "YOURSEED"
+}
