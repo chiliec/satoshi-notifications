@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Logs (created by pm2 per README)
+logs/
+*.log
+
+# Local secrets — config.json holds the bot token & RPC API key.
+# Copy config.example.json to config.json and fill it in.
+config.json
+
+# OS / editor
+.DS_Store
