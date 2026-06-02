@@ -121,9 +121,7 @@ async function notify(tx, amount) {
   const txUrl = `https://tonviewer.com/transaction/${tx.hash().toString("hex")}`;
   const fromLink = from ? `<a href="https://tonviewer.com/${from}">${label}</a>` : label;
 
-  const message = `⛏ <b>New $SATOSHI block mined!</b>
-
-👤 ${fromLink}
+  const message = `👤 ${fromLink}
 💰 ${reward}
 🕐 ${date}
 
