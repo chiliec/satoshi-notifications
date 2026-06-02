@@ -5,9 +5,9 @@ node_modules/
 logs/
 *.log
 
-# Local secrets — config.json holds the bot token & RPC API key.
-# Copy config.example.json to config.json and fill it in.
-config.json
+# Local secrets — .env holds the bot token & RPC API key.
+# Copy .env.example to .env and fill it in.
+.env
 
 # OS / editor
 .DS_Store

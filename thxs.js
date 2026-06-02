@@ -1,11 +1,35 @@
 // $SATOSHI channel bot: posts a notification for every mining transaction
 // and a daily "top 20 holders" rating.
-const config = require("./config.json");
 const fs = require("fs");
 const { Bot } = require("grammy");
 const { CronJob } = require("cron");
 const { TonClient } = require("@ton/ton");
 const { Address, fromNano } = require("@ton/core");
+
+// Load variables from a local .env file if present (Node >= 20.12).
+// In production they can also come from the environment (pm2, shell, etc.).
+if (typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // no .env file — fall back to the existing environment
+  }
+}
+
+const required = ["RPC", "API_KEY", "TOKEN_ADDRESS", "BOT_TOKEN", "CHANNEL_ID"];
+const missing = required.filter((key) => !process.env[key]);
+if (missing.length) {
+  console.error(`Missing environment variables: ${missing.join(", ")}. Copy .env.example to .env and fill it in.`);
+  process.exit(1);
+}
+
+const config = {
+  rpc: process.env.RPC,
+  api_key: process.env.API_KEY,
+  token_address: process.env.TOKEN_ADDRESS,
+  bot_api_key: process.env.BOT_TOKEN,
+  channel_id: process.env.CHANNEL_ID,
+};
 
 const client = new TonClient({ endpoint: config.rpc, apiKey: config.api_key });
 const bot = new Bot(config.bot_api_key);
@@ -81,10 +105,11 @@ async function notify(tx, amount) {
   const source = tx.inMessage ? messageSource(tx.inMessage) : null;
   const from = source ? source.toString({ bounceable: false }) : null;
 
-  let label = from ? shortenAddress(from) : "N/A";
+  // Show the full domain (or full address) — no truncation in the notification.
+  let label = from ?? "N/A";
   if (from) {
     const domain = await resolveDomain(from);
-    if (domain) label = shortenDomain(domain);
+    if (domain) label = domain;
   }
 
   const date = new Date(Number(tx.now) * 1000).toLocaleString("en-US", {
