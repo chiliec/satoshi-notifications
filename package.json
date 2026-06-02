@@ -2,9 +2,9 @@
   "name": "ton-satoshi-notifications",
   "version": "1.0.0",
   "description": "Telegram channel bot for $SATOSHI mining transaction notifications",
-  "main": "thxs.js",
+  "main": "bot.js",
   "scripts": {
-    "start": "node thxs.js"
+    "start": "node bot.js"
   },
   "engines": {
     "node": ">=20.12"
