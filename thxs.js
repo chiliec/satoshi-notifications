@@ -1,319 +1,167 @@
-// Load config
+// $SATOSHI channel bot: posts a notification for every mining transaction
+// and a daily "top 20 holders" rating.
 const config = require("./config.json");
-const TonWeb = require('tonweb');
-const fs = require('fs');
-const { Bot } = require('grammy');
-const axios = require('axios');
-const tonweb = new TonWeb(new TonWeb.HttpProvider(config.rpc, { apiKey: config.tonweb_api_key }));
-const CronJob = require('cron').CronJob;
+const fs = require("fs");
+const { Bot } = require("grammy");
+const { CronJob } = require("cron");
+const { TonClient } = require("@ton/ton");
+const { Address, fromNano } = require("@ton/core");
 
-const contractAddress = config.token_address;
-
-// Инициализируем бота grammY с вашим токеном бота
+const client = new TonClient({ endpoint: config.rpc, apiKey: config.api_key });
 const bot = new Bot(config.bot_api_key);
+const tokenAddress = Address.parse(config.token_address);
 
-const channelId = config.channel_id;
+const STATE_FILE = "tx.json";
+// A successful mine ends with the token master sending a jetton internal_transfer
+// (TEP-74 op) to the miner. We read the reward straight from that message.
+const JETTON_INTERNAL_TRANSFER_OP = 0x178d4519;
+const POLL_INTERVAL = 5000;
+const MEDALS = ["🥇", "🥈", "🥉"];
+const LINK_MINE = '<a href="https://chiliec.github.io/Satoshi">Mine now</a>';
+const LINK_DISCUSS = '<a href="https://t.me/DAOthxS">Discuss</a>';
+const FOOTER = `⛏ ${LINK_MINE}  ·  💬 ${LINK_DISCUSS}`;
 
-// Путь к файлу JSON, где мы будем сохранять lastTxLt
-const txFilePath = 'tx.json';
-
-function saveState(lastTxLt, lastBlockTime) {
-    const state = {
-        lastTxLt: lastTxLt,
-        lastBlockTime: lastBlockTime,
-    };
-    fs.writeFileSync('tx.json', JSON.stringify(state));
-}
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function loadState() {
-    if (fs.existsSync('tx.json')) {
-        const state = fs.readFileSync('tx.json', 'utf8');
-        return JSON.parse(state);
-    }
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveState(state) {
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+}
+
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
+}
+
+// Resolve a wallet address to its .ton domain, or null on any failure.
+async function resolveDomain(address) {
+  try {
+    const data = await getJson(`https://tonapi.io/v2/accounts/${address}/dns/backresolve`);
+    return data?.domains?.[0] ?? null;
+  } catch {
     return null;
+  }
 }
 
-// Функция вызова get_mining_data из смарт-контракта
-async function getMiningData(address) {
+const shortenDomain = (s, edge = 5) =>
+  s.length > edge * 2 + 2 ? `${s.slice(0, edge)}...${s.slice(-edge)}` : s;
+const shortenAddress = (s, edge = 4) => `${s.slice(0, edge)}...${s.slice(-edge)}`;
+
+function messageSource(msg) {
+  const { info } = msg;
+  return (info.type === "internal" || info.type === "external-out") && info.src ? info.src : null;
+}
+
+// Returns the mined reward (in $SATOSHI) if the transaction is a successful
+// mint, or null otherwise. Failed attempts produce no internal_transfer.
+function minedReward(tx) {
+  for (const msg of tx.outMessages.values()) {
     try {
-        const result = await tonweb.call(address, 'get_mining_data', []);
-        const stack = result.stack;
-
-        // Парсим значения из стека как шестнадцатеричные числа
-        const lastBlock = parseInt(stack[0][1], 16);
-        const lastBlockTime = parseInt(stack[1][1], 16);
-        const attempts = parseInt(stack[2][1], 16);
-        const subsidy = parseInt(stack[3][1], 16);
-        const probability = parseInt(stack[4][1], 16);
-
-        return {
-            lastBlock: lastBlock,
-            lastBlockTime: lastBlockTime,
-            attempts: attempts,
-            subsidy: subsidy,
-            probability: probability
-        };
-    } catch (error) {
-        console.error('Ошибка при вызове get_mining_data:', error);
-        return null;
+      const slice = msg.body.beginParse();
+      if (slice.remainingBits >= 32 && slice.loadUint(32) === JETTON_INTERNAL_TRANSFER_OP) {
+        slice.loadUintBig(64); // query_id
+        return Number(fromNano(slice.loadCoins()));
+      }
+    } catch {
+      // not an internal_transfer body, keep looking
     }
+  }
+  return null;
 }
 
-// Функция расчёта награды за блок в $SATOSHI
-function getBlockSubsidy(height) {
-    const blockSubsidyHalvingInterval = 210000;
-    const halvings = Math.floor(height / blockSubsidyHalvingInterval);
-    if (halvings >= 64) {
-        return 0;
-    }
-    const initialReward = 50; // 50 $SATOSHI
-    return initialReward / Math.pow(2, halvings);
+async function notify(tx, amount) {
+  const source = tx.inMessage ? messageSource(tx.inMessage) : null;
+  const from = source ? source.toString({ bounceable: false }) : null;
+
+  let label = from ? shortenAddress(from) : "N/A";
+  if (from) {
+    const domain = await resolveDomain(from);
+    if (domain) label = shortenDomain(domain);
+  }
+
+  const date = new Date(Number(tx.now) * 1000).toLocaleString("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  const reward =
+    amount > 0 ? `<b>+${amount.toLocaleString("en-US")} $SATOSHI</b>` : "No reward";
+  const txUrl = `https://tonviewer.com/transaction/${tx.hash().toString("hex")}`;
+  const fromLink = from ? `<a href="https://tonviewer.com/${from}">${label}</a>` : label;
+
+  const message = `⛏ <b>New $SATOSHI block mined!</b>
+
+👤 ${fromLink}
+💰 ${reward}
+🕐 ${date}
+
+🔗 <a href="${txUrl}">Transaction</a>  ·  ${FOOTER}`;
+
+  await bot.api.sendMessage(config.channel_id, message, { parse_mode: "HTML" });
 }
 
 async function watchTransactions() {
-    const address = new TonWeb.utils.Address(contractAddress);
-    let state = loadState();
-    let lastTxLt = state ? state.lastTxLt : null;
-    let lastBlockTime = state ? state.lastBlockTime : null;
+  const state = loadState();
+  let lastTxLt = state.lastTxLt ? BigInt(state.lastTxLt) : null;
 
-    if (!lastBlockTime) {
-        // Если `lastBlockTime` не сохранён, инициализируем его текущим временем
-        // или получаем из смарт-контракта, если имеется
-        const miningData = await getMiningData(address);
-        if (miningData) {
-            lastBlockTime = miningData.lastBlockTime;
-        } else {
-            // Если не удалось получить данные, используем текущее время
-            lastBlockTime = Math.floor(Date.now() / 1000);
-        }
-    }
-
-    while (true) {
-        try {
-            // Получаем последние 20 транзакций
-            const txs = await tonweb.getTransactions(address.toString(true, true, true), 20, null, null);
-
-            if (txs.length > 0) {
-                // Обрабатываем транзакции от старых к новым
-                txs.reverse();
-
-                for (const tx of txs) {
-                    // Получаем lt и utime транзакции
-                    const txLtRaw = tx.transaction_id.lt;
-                    const txLt = BigInt(typeof txLtRaw === 'object' ? txLtRaw.value : txLtRaw);
-                    const lastTxLtBigInt = lastTxLt !== null ? BigInt(lastTxLt) : null;
-
-                    // Проверяем, не обрабатывали ли мы уже эту транзакцию
-                    if (lastTxLtBigInt !== null && txLt <= lastTxLtBigInt) {
-                        continue; // Транзакция уже обработана
-                    }
-
-                    const mintResult = transactionContainsMint(tx);
-                    if (mintResult) {
-                        // Обрабатываем транзакцию mint
-                        let { recipientAddress, amount, msg, type } = mintResult;
-
-                        const currentUnixTime = Number(tx.utime);
-
-if (!amount) {
-                            // Получаем обновлённый номер последнего блока из смарт-контракта
-                            const miningData = await getMiningData(address);
-                            if (!miningData) {
-                                console.error('Не удалось получить данные о майнинге из смарт-контракта');
-                                continue;
-                            }
-                            const lastBlockHeight = miningData.lastBlock;
-    
-                            // Вычисляем количество минут с момента предыдущего майнинга
-                            const minutesSinceLastBlock = Math.floor((currentUnixTime - lastBlockTime) / 60);
-    
-                            // Вычисляем количество блоков для майнинга
-                            let blocksToMine = Math.floor(minutesSinceLastBlock / 10);
-                            if (blocksToMine < 1) {
-                                blocksToMine = 1;
-                            }
-    
-                            // Вычисляем сумму награды
-                            amount = 0;
-                            for (let i = 1; i <= blocksToMine; i++) {
-                                const blockNumber = lastBlockHeight - blocksToMine + i;
-                                const subsidy = getBlockSubsidy(blockNumber);
-                                amount += subsidy;
-                            }
-} // end if !amount.
-                        
-// Обновляем `lastBlockTime` на время текущей транзакции
-                        lastBlockTime = currentUnixTime;
-
-                        // Формируем сообщение
-                        const unixTime = tx.utime;
-                        const date = new Date(unixTime * 1000); // Умножаем на 1000, чтобы получить миллисекунды
-                        const formattedDate = date.toLocaleString('en-EN');
-
-                        const fromAddress = new TonWeb.utils.Address(tx.in_msg.source).toString(true, true, false);
-                        let source = tx.in_msg && tx.in_msg.source ? fromAddress : 'N/A';
-                        source = `${source.slice(0, 4)}...${source.slice(-4)}`;
-                        const receivedText = amount > 0 ? `Received: ${amount} $SATOSHI` : 'No reward';
-                        
-                        const transactionHashBase64 = tx.transaction_id.hash; // Предполагаем, что это base64 строка
-                        const transactionHashHex = Buffer.from(transactionHashBase64, 'base64').toString('hex');
-                        const txUrl = `https://tonviewer.com/transaction/${transactionHashHex}`;
-                        let recipient = recipientAddress.toString(true, true, false);
-try {
-    const domains = await axios.get(`https://tonapi.io/v2/accounts/${fromAddress}/dns/backresolve`);
- if (domains.data && domains.data.domains && domains.data.domains.length > 0) recipient = domains.data.domains[0];
- if (domains.data && domains.data.domains && domains.data.domains.length > 0) {
-    let domain = domains.data.domains[0];
-    // Если домен длинный, сокращаем до 11 символов, добавляя '...'
-    source = domain.length > 12 ? `${domain.slice(0, 5)}...${domain.slice(-5)}` : domain;
-}
-} catch(err) {
-    console.error(err);
-}
-
-                        const message = `From <a href="https://tonviewer.com/${fromAddress}">${source}</a>
-${receivedText}
-Date: ${formattedDate}
-<a href="https://chiliec.github.io/Satoshi">MINE NOW</a> | <a href="${txUrl}">TX</a> | <a href="https://t.me/DAOthxS">DISCUSS</a>`;
-
-                        // Отправляем сообщение в Telegram-канал
-                        try {
-                            await bot.api.sendMessage(channelId, message, { parse_mode: 'HTML' });
-                        } catch (err) {
-                            console.error('Ошибка при отправке сообщения в Telegram:', err);
-                        }
-
-                        // Сохраняем состояние
-                        lastTxLt = txLt.toString();
-                        saveState(lastTxLt, lastBlockTime);
-                    } else {
-                        // Обновляем lastTxLt даже если транзакция не содержит символа "F"
-                        lastTxLt = txLt.toString();
-                        saveState(lastTxLt, lastBlockTime);
-                    }
-                }
-            } else {
-                console.log('Нет транзакций для обработки.');
-            }
-
-            await delay(5000);
-        } catch (error) {
-            console.error('Ошибка при получении транзакций:', error);
-            await delay(5000);
-        }
-    }
-}
-
-function transactionContainsMint(tx) {
-    let messages = [];
-    if (tx.in_msg) {
-        messages.push(tx.in_msg);
-    }
-    if (tx.out_msgs && tx.out_msgs.length > 0) {
-        messages = messages.concat(tx.out_msgs);
-    }
-
-    // Шаг 1: Проверяем, содержит ли транзакция сообщение "Mining failed."
-    for (const msg of messages) {
-        if (msg.message && typeof msg.message === 'string' && msg.message.includes('Mining failed.')) {
-            // Транзакция содержит "Mining failed.", пропускаем всю транзакцию
-            return null;
-        }
-    }
-
-    // Шаг 2: Если нет "Mining failed.", продолжаем обработку сообщений
-    for (const msg of messages) {
-        // Проверяем наличие тела сообщения
-        const bodyBase64 = msg.msg_data && msg.msg_data.body ? msg.msg_data.body : null;
-
-        if (bodyBase64) {
-            try {
-                const bodyBuffer = Buffer.from(bodyBase64, 'base64');
-                const cell = TonWeb.boc.Cell.fromBoc(bodyBuffer)[0];
-                const slice = cell.beginParse();
-
-                if (slice.remainingBits >= 32) {
-                    const opcode = slice.loadUint(32).toNumber();
-console.log('opcode:', opcode);
-                    if (opcode === 260734629) { // 0x0f8a7ea5 в десятичном 260734629
-                        // Опкод совпадает, операция transfer
-                        const query_id = slice.loadUintBig(64);
-                        const amount = slice.loadCoins();
-                        const _ = slice.loadAddress(); // Пропускаем ненужный адрес
-                        const recipientAddress = slice.loadAddress(); // Читаем destination (адрес получателя)
-
-                        return {
-                            recipientAddress: recipientAddress,
-                            amount: TonWeb.utils.fromNano(amount),
-                            msg: msg,
-                            type: 'MINT_OPCODE'
-                        };
-                    }
-                }
-            } catch (err) {
-                // Игнорируем ошибки парсинга
-                // console.error('Ошибка при парсинге тела сообщения:', err);
-            }
-        }
-
-        // Если сообщение содержит текстовое сообщение
-        if (msg.message && typeof msg.message === 'string' && msg.message.includes('F')) {
-            // Сообщение содержит "F"
-            // Мы уже проверили, что транзакция не содержит "Mining failed."
-            return {
-                recipientAddress: msg.source ? new TonWeb.utils.Address(msg.source) : null,
-                msg: msg,
-                type: 'F_MESSAGE'
-            };
-        }
-    }
-
-    return null;
-}
-
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Запускаем функцию наблюдения за транзакциями
-watchTransactions();
-
-async function getTop() {
+  while (true) {
     try {
-                const page = await axios.get(`https://toncenter.com/api/v3/jetton/wallets?jetton_address=EQCkdx5PSWjj-Bt0X-DRCfNev6ra1NVv9qqcu-W2-SaToSHI&exclude_zero_balance=true&limit=20&offset=0&sort=desc`);
-        const top = page.data.jetton_wallets;
-        let text = '';
-        if (top && top.length > 0) {
-            text = `$SATOSHI top 20 #rating:
-| Number | from | amount |
-`;
-let counter = 1;
-for (let user of top) {
-                const address = new TonWeb.utils.Address(user.owner).toString(true, true, false);
-                const balance = parseInt(TonWeb.utils.fromNano(user.balance));
-                let owner = `${address.slice(0, 4)}...${address.slice(-4)}`;
-try {
-    const domains = await axios.get(`https://tonapi.io/v2/accounts/${address}/dns/backresolve`);
-    if (domains.data && domains.data.domains && domains.data.domains.length > 0) {
-        let domain = domains.data.domains[0];
-        // Если домен длинный, сокращаем до 11 символов, добавляя '...'
-        owner = domain.length > 12 ? `${domain.slice(0, 5)}...${domain.slice(-5)}` : domain;
-    }
-} catch(err) {}
-           text += `| ${counter} | <a href="https://tonviewer.com/${address}">${owner}</a> | ${balance} |
-`;
-                counter++;
-                await delay(5000);
-            }
-        text += `
-<a href="https://chiliec.github.io/Satoshi">MINE NOW</a> | <a href="https://t.me/DAOthxS">DISCUSS</a>`
+      const txs = (await client.getTransactions(tokenAddress, { limit: 20 })).reverse();
+      for (const tx of txs) {
+        const lt = BigInt(tx.lt);
+        if (lastTxLt !== null && lt <= lastTxLt) continue;
+
+        const reward = minedReward(tx);
+        if (reward !== null) {
+          try {
+            await notify(tx, reward);
+          } catch (err) {
+            console.error("Failed to send Telegram message:", err);
+          }
         }
-        if (text !== '') {
-            await bot.api.sendMessage(channelId, text, { parse_mode: 'HTML' });
-        }
-    } catch(err) {
-        console.error(err);
+
+        lastTxLt = lt;
+        saveState({ lastTxLt: lastTxLt.toString() });
+      }
+    } catch (err) {
+      console.error("Failed to fetch transactions:", err);
     }
+    await delay(POLL_INTERVAL);
+  }
 }
 
-new CronJob('0 0 20 * * *', getTop, null, true);    
+async function postTopHolders() {
+  try {
+    const url = `https://toncenter.com/api/v3/jetton/wallets?jetton_address=${config.token_address}&exclude_zero_balance=true&limit=20&offset=0&sort=desc`;
+    const { jetton_wallets: wallets } = await getJson(url);
+    if (!wallets?.length) return;
+
+    const lines = [];
+    let rank = 1;
+    for (const wallet of wallets) {
+      const address = Address.parse(wallet.owner).toString({ bounceable: false });
+      const balance = parseInt(fromNano(wallet.balance)).toLocaleString("en-US");
+      const domain = await resolveDomain(address);
+      const holder = domain ? shortenDomain(domain, 8) : shortenAddress(address, 7);
+      const badge = MEDALS[rank - 1] ?? `${String(rank).padStart(2)}`;
+      lines.push(`${badge}  <a href="https://tonviewer.com/${address}">${holder}</a> — <b>${balance}</b>`);
+      rank++;
+      await delay(POLL_INTERVAL);
+    }
+
+    const text = `🏆 <b>$SATOSHI — Top 20 Holders</b>\n\n${lines.join("\n")}\n\n${FOOTER}`;
+    await bot.api.sendMessage(config.channel_id, text, { parse_mode: "HTML" });
+  } catch (err) {
+    console.error("Failed to post top holders:", err);
+  }
+}
+
+watchTransactions();
+new CronJob("0 0 20 * * *", postTopHolders, null, true);
