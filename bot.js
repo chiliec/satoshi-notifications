@@ -31,6 +31,12 @@ const config = {
   channel_id: process.env.CHANNEL_ID,
 };
 
+// Per-request HTTP timeout for the TON RPC, plus bounded retries with
+// exponential backoff so a slow or flaky endpoint doesn't stall the poller.
+const RPC_TIMEOUT = 15000;
+const RPC_RETRIES = 3;
+const RPC_RETRY_DELAY = 1000;
+
 const client = new TonClient({
   endpoint: config.rpc,
   apiKey: config.api_key,
@@ -45,11 +51,6 @@ const STATE_FILE = "tx.json";
 const JETTON_INTERNAL_TRANSFER_OP = 0x178d4519;
 const MINE_OP = 0xe9b94603;
 const POLL_INTERVAL = 5000;
-// Per-request HTTP timeout for the TON RPC, plus bounded retries with
-// exponential backoff so a slow or flaky endpoint doesn't stall the poller.
-const RPC_TIMEOUT = 15000;
-const RPC_RETRIES = 3;
-const RPC_RETRY_DELAY = 1000;
 const MEDALS = ["🥇", "🥈", "🥉"];
 const LINK_MINE = '<a href="https://chiliec.github.io/Satoshi">Mine now</a>';
 const LINK_DISCUSS = '<a href="https://t.me/DAOthxS">Discuss</a>';
