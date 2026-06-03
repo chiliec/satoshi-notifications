@@ -31,7 +31,11 @@ const config = {
   channel_id: process.env.CHANNEL_ID,
 };
 
-const client = new TonClient({ endpoint: config.rpc, apiKey: config.api_key });
+const client = new TonClient({
+  endpoint: config.rpc,
+  apiKey: config.api_key,
+  timeout: RPC_TIMEOUT,
+});
 const bot = new Bot(config.bot_api_key);
 const tokenAddress = Address.parse(config.token_address);
 
@@ -41,12 +45,32 @@ const STATE_FILE = "tx.json";
 const JETTON_INTERNAL_TRANSFER_OP = 0x178d4519;
 const MINE_OP = 0xe9b94603;
 const POLL_INTERVAL = 5000;
+// Per-request HTTP timeout for the TON RPC, plus bounded retries with
+// exponential backoff so a slow or flaky endpoint doesn't stall the poller.
+const RPC_TIMEOUT = 15000;
+const RPC_RETRIES = 3;
+const RPC_RETRY_DELAY = 1000;
 const MEDALS = ["🥇", "🥈", "🥉"];
 const LINK_MINE = '<a href="https://chiliec.github.io/Satoshi">Mine now</a>';
 const LINK_DISCUSS = '<a href="https://t.me/DAOthxS">Discuss</a>';
 const FOOTER = `⛏ ${LINK_MINE}  ·  💬 ${LINK_DISCUSS}`;
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Retry an async operation with exponential backoff. Used for TON RPC calls,
+// which can intermittently time out or return transient errors.
+async function withRetry(fn, { retries = RPC_RETRIES, baseDelay = RPC_RETRY_DELAY, label } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= retries) throw err;
+      const wait = baseDelay * 2 ** attempt;
+      console.warn(`${label ?? "RPC call"} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${wait}ms:`, err.message);
+      await delay(wait);
+    }
+  }
+}
 
 function loadState() {
   try {
@@ -160,7 +184,11 @@ async function watchTransactions() {
 
   while (true) {
     try {
-      const txs = (await client.getTransactions(tokenAddress, { limit: 20 })).reverse();
+      const txs = (
+        await withRetry(() => client.getTransactions(tokenAddress, { limit: 20 }), {
+          label: "getTransactions",
+        })
+      ).reverse();
       for (const tx of txs) {
         const lt = BigInt(tx.lt);
         if (lastTxLt !== null && lt <= lastTxLt) continue;
