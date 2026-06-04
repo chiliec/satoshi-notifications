@@ -45,7 +45,7 @@ const client = new TonClient({
 const bot = new Bot(config.bot_api_key);
 const tokenAddress = Address.parse(config.token_address);
 
-const STATE_FILE = "tx.json";
+const STATE_FILE = process.env.STATE_FILE ?? "tx.json";
 // A successful mine ends with the token master sending a jetton internal_transfer
 // (TEP-74 op) to the miner. We read the reward straight from that message.
 const JETTON_INTERNAL_TRANSFER_OP = 0x178d4519;

@@ -11,3 +11,6 @@ logs/
 
 # OS / editor
 .DS_Store
+
+# Runtime state (lastTxLt cursor) — lives on the server volume in prod
+tx.json

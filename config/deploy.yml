@@ -1,0 +1,39 @@
+# Kamal deploy config — send-only Telegram channel poller. No inbound HTTP
+# (no webhook, no long-poll), no DB: role-level proxy: false, no top-level
+# proxy: block (infra runbook-viz-migration §3.1 pattern).
+
+service: satoshi-notifications
+image: chiliec/satoshi-notifications
+
+servers:
+  web:
+    hosts:
+      - axveer.io
+    proxy: false              # send-only bot — nothing listens
+
+ssh:
+  user: deploy
+  port: 666
+
+registry:
+  server: ghcr.io
+  username: chiliec
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+env:
+  clear:
+    NODE_ENV: production
+    RPC: https://toncenter.com/api/v2/jsonRPC
+    TOKEN_ADDRESS: EQCkdx5PSWjj-Bt0X-DRCfNev6ra1NVv9qqcu-W2-SaToSHI
+    CHANNEL_ID: "-1002312994949"
+    STATE_FILE: /data/tx.json # persisted lastTxLt cursor — survives redeploys
+  secret:
+    - API_KEY
+    - BOT_TOKEN
+
+volumes:
+  - /srv/satoshi-notifications:/data
+
+builder:
+  arch: amd64
