@@ -8,7 +8,7 @@ image: chiliec/satoshi-notifications
 servers:
   web:
     hosts:
-      - axveer.io
+      - 5.223.75.86           # axveer VPS public IPv4; IP (not host) per repo convention
     proxy: false              # send-only bot — nothing listens
 
 ssh:
