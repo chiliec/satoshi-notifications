@@ -1,5 +1,5 @@
 # Single-file Node poller — no build step, prod deps only.
-FROM node:20-alpine
+FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
